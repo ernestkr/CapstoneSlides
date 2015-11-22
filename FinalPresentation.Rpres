@@ -1,0 +1,137 @@
+Check-Ins vs. Review Score Relationship in Yelp Data Set
+========================================================
+author: Ernest Kurniawan
+date: 22 November 2015
+transition: rotate
+  
+<br>
+  
+<small>
+Course assignment for Coursera  
+**Capstone Project**  
+Part of Data Science Specialization series.
+</small>
+
+Motivation
+========================================================
+
+A good review in Yelp is expected to promote the fact that a particular business is good, and therefore will attract more customers to engage the business, which will in turn generate a large number of check-ins. 
+
+The motivation of this work is to show the relationship between the review score that a business receive and the total number of check-ins that it generates.
+
+By analyzing the Yelp data set, we first show this relationship, and build a simple model to corroborate this fact. Then we proceed on building a prediction model to estimate the business ratings based on the check-ins data and other relevant information. Finally, the prediction performance is evaluated through cross validation.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+if (!"jsonlite" %in% rownames(installed.packages())) install.packages("jsonlite")
+library(jsonlite)
+if (!"ggplot2" %in% rownames(installed.packages())) install.packages("ggplot2")
+library("ggplot2")
+if (!"caret" %in% rownames(installed.packages())) install.packages("caret")
+library("caret")
+if (!"e1071" %in% rownames(installed.packages())) install.packages("e1071")
+library("e1071")
+```
+```{r, echo=FALSE, cache=TRUE}
+## Load the business data set
+BusinessDF <- fromJSON(sprintf("[%s]", paste(readLines('yelp_academic_dataset_business.json'),
+                collapse=",")), flatten = TRUE)
+tempCategory = BusinessDF$categories
+## Extract those records that correspond to the restaurant business
+isResto = rep(FALSE, length(tempCategory))
+for (i in 1: length(tempCategory)){
+  if ('Restaurants' %in% tempCategory[[i]]){isResto[i] = TRUE}
+}
+BusinessDF = BusinessDF[isResto,]
+RestoBusinessID = BusinessDF$business_id
+## Load the checkin data set
+CheckinDF <- fromJSON(sprintf("[%s]", 
+                paste(readLines('yelp_academic_dataset_checkin.json'), collapse=",")))
+## Extract those checkin data for the Restaurant Business
+CheckinDF = CheckinDF[sapply(CheckinDF$business_id, function(x) x %in% RestoBusinessID),]
+## Note that some of the restaurant businesses do not have any check in data yet.
+
+fnames = list.files(pattern="^Review")
+BusinessReviewDF = NULL
+## Extract those reviews from the restaurant businesses under consideration
+for (i in 1: length(fnames)){
+  ReviewDF <- fromJSON(sprintf("[%s]", paste(readLines(fnames[i]), collapse=",")), 
+                  flatten = TRUE)
+  ## Here we remove the text review to save some memory space
+  ReviewDF <- ReviewDF[sapply(ReviewDF$business_id, function(x) x%in%RestoBusinessID),-5]
+  BusinessReviewDF = rbind(BusinessReviewDF, ReviewDF)
+}
+## Update the row names of the Business data frame so that it is accessible by the id
+row.names(BusinessDF) <- BusinessDF$business_id
+
+ReviewBId = BusinessReviewDF$business_id
+ReviewStars = c(1, 2, 3, 4, 5)
+strSuffix = c("Stars", "StarsFunny", "StarsUseful", "StarsCool")
+## Add columns to the Checkin data frame to include the star rating, total checkin, and
+## other relevant variables
+CheckinDF[,c("stars", "totCheckIn", "totReviews", 
+          paste0(ReviewStars, strSuffix[1]), paste0(ReviewStars, strSuffix[2]), 
+          paste0(ReviewStars, strSuffix[3]), paste0(ReviewStars, strSuffix[4]))] <- 0
+for (i in 1: nrow(CheckinDF)){
+  CheckinDF[i,]$stars <- BusinessDF[CheckinDF[i,"business_id"],]$stars
+  CheckinDF[i,]$totCheckIn <- rowSums(CheckinDF[i,]$checkin_info, na.rm = TRUE)
+  CheckinDF[i,]$totReviews <- sum(BusinessReviewDF$business_id==CheckinDF[i,"business_id"])
+  tempBReviewDF = BusinessReviewDF[ReviewBId == CheckinDF[i,"business_id"] ,]
+  for (j in 1 : length(ReviewStars)){
+    temp = subset(tempBReviewDF, stars==ReviewStars[j])
+    CheckinDF[i, paste0(ReviewStars[j], strSuffix[1])] = nrow(temp)
+    CheckinDF[i, paste0(ReviewStars[j], strSuffix[2])] = sum(temp$votes.funny)
+    CheckinDF[i, paste0(ReviewStars[j], strSuffix[3])] = sum(temp$votes.useful)
+    CheckinDF[i, paste0(ReviewStars[j], strSuffix[4])] = sum(temp$votes.cool)
+  }
+}
+CheckinDF$checkin_info <- NULL
+
+
+```
+
+Prediction Method
+========================================================
+
+In order to show the relationship between star ratings and the total check-ins, we show the scatter plot together with the simple linear model relating the two.
+```{r, echo=FALSE, warning=FALSE, fig.height=8, fig.width=16}
+g <- ggplot(CheckinDF, aes(y=stars, x=totCheckIn))
+g <- g + geom_point()
+g <- g + labs(title="Scatter plot of total check-ins for businesses with different star ratings")
+g <- g + xlab("Total Check-Ins") + ylab("Star Ratings")
+SimpleLinearModel <- lm(stars~totCheckIn, data=CheckinDF)
+g <- g + geom_abline(aes(slope=SimpleLinearModel$coef[2],
+          intercept=SimpleLinearModel$coef[1]), color="red")
+g
+```
+```{r, echo=FALSE, cache=TRUE, message=FALSE}
+set.seed(88288)
+inTrain <- createDataPartition(
+  y=CheckinDF$stars, p=0.7, list=FALSE)
+CheckinDF$starsFactor <- as.factor(CheckinDF$stars)
+```
+
+Prediction Method (Continued)
+========================================================
+
+Two models are then created, one using a simple linear model, and another using random forest model.
+```{r, echo=TRUE, cache=TRUE, message=FALSE, warning=FALSE}
+MyModel1 <- lm(stars~totCheckIn, data=CheckinDF[inTrain,])
+MyModel2 <- train(starsFactor~., data=CheckinDF[inTrain, -c(1,2,3)], method = "rf", ntree=100)
+```
+After cross validation, the prediction errors of both models are respectively shown in the black and red curves below.
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.width=16, fig.height=3}
+Prediction1 <- predict(MyModel1, CheckinDF[-inTrain,])
+Prediction1 <- round(Prediction1 * 2)/2
+PredError1 <- CheckinDF[-inTrain,]$stars - Prediction1
+Prediction2 <- predict(MyModel2, CheckinDF[-inTrain, -c(1,2,3)])
+PredError2 <- CheckinDF[-inTrain,]$stars - as.numeric(as.character(Prediction2))
+plot(PredError1, type="l", ylab="Prediction Error", xlab="")
+lines(PredError2, col="red")
+```
+
+Results and Discussions
+========================================================
+
+- We have shown the positive correlation between review ratings and total check-ins, which holds except for the ratings above 4 stars.
+- Using linear model and random forest, we build a prediction model for the ratings using total check-ins and other information to achieve prediction error of `r sum(PredError1 != 0)/nrow(CheckinDF[-inTrain,])` for the linear model, and `r sum(PredError2 != 0)/nrow(CheckinDF[-inTrain,])` for the random forest.
+- We believe by including other factors such as the social connectivity of the reviewer, and taking into consideration the number of businesses from a particular rating group, we are able to improve the prediction accuracy.
